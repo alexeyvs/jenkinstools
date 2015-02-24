@@ -1,0 +1,407 @@
+<project name="Migrate jobs from Hudson to Jenkins" default="all" basedir=".">
+<description>
+    - This Ant script was created to migrate jobs defined in Hudson 2.2.1 to Jenkins 1.509
+    - It needs environment variables HUDSON_HOME set to the hudson home, and JENKINS_HOME to the jenkins home.
+    - This script was developed as follows:
+        1. all jobs were copied to Jenkins as-is, and Jenkins was started.
+        2. Jenkins logging output was checked for any errors (there were many). 
+        3. Logic was added to this script to convert the configuration items of the Hudson jobs that Jenkins stored differently
+        4. This process was repeated until Jenkins loaded all jobs without error and the job configuration in Jenkins was correct upon visual inspection.
+    - The consequence of the above approach is that this script ONLY migrates configuration items that we were using. For any additional configuration items to be migrated the script needs to be extended. Just create a new job in Jenkins, configure the missing configuration item, and check in the job's config.xml how Jenkins stores it. Then extend the script to cover the migration of that configuration item.
+    - Tested with Hudson 2.2.1 and Jenkins 1.509
+    - This Ant script needs ant-contrib and xmltask libraries
+    - The script in its current form will only work on Linux
+    - This was created as a 'throw away' Ant script. No effort was put in making it efficient, complete, reliable, etc.
+    - Always backup HUDSON_HOME and JENKINS_HOME beforehand
+    - Use at your own risk
+</description>
+
+<taskdef resource="net/sf/antcontrib/antlib.xml"/>
+<taskdef name="xmltask" classname="com.oopsconsultancy.xmltask.ant.XmlTask"/>
+
+<property environment="env"/>
+
+<target name="all">
+    <for param="dir">
+        <path>
+            <path>
+                <dirset dir="${env.HUDSON_HOME}/jobs" includes="*"/>
+            </path>
+        </path>
+        <sequential>
+            <local name="dir.base"/>
+            <basename property="dir.base" file="@{dir}"/>
+            <echo message="Handling ${dir.base}"/>
+
+            <antcall target="migrateProject">
+                <param name="hudson.job" value="${dir.base}"/>
+            </antcall>
+        </sequential>
+    </for>
+</target>
+
+<target name="migrateProject">
+
+  <delete dir="${env.JENKINS_HOME}/jobs/${hudson.job}"/>
+  <mkdir dir="${env.JENKINS_HOME}/jobs/${hudson.job}"/>
+
+  <!-- Need to keep symbolic links working -->
+  <exec executable="bash">
+    <arg value="-c"/>
+    <arg value="cd '${env.HUDSON_HOME}/jobs/${hudson.job}' ; tar -c --exclude workspace . | tar -x -C '${env.JENKINS_HOME}/jobs/${hudson.job}'"/>
+  </exec>
+  
+  <copy file="${env.JENKINS_HOME}/jobs/${hudson.job}/config.xml" tofile="${env.JENKINS_HOME}/jobs/${hudson.job}/config.xml.hudson.org"/>
+
+    <for param="config.xml.file">
+    <path>
+        <fileset dir="${env.JENKINS_HOME}/jobs/${hudson.job}">
+            <include name="config.xml"/>
+            <include name="modules/**/config.xml"/>
+        </fileset>
+    </path>
+    <sequential>
+            <local name="publishers.count"/>
+            <local name="builders.count"/>
+            <!--OC
+                params of editXml task:
+                xpath.source - The source xml to copy to another location in the document
+                xpath.insert - The position to insert "xml.to.insert"
+                xpath.dest - The position to insert "xpath.source"
+                xml.to.insert - The xml to insert at "xpath.insert"
+
+            <antcall target="editXml" inheritAll="true" inheritRefs="true">
+                <param name="config.xml.file" value="@{config.xml.file}"/>
+                <param name="xpath.source" value="//matrix-project/*"/>
+                <param name="xpath.insert" value="/*"/>
+                <param name="xpath.dest" value="/*/axes"/>
+                <param name="xml.to.insert" value="&lt;matrix-project plugin=&quot;matrix-project@1.4&quot;/&gt; "/>
+            </antcall>
+	    -->
+            <xmltask source="@{config.xml.file}" dest="@{config.xml.file}">
+                <remove path="/matrix-project/axes"/>
+	    </xmltask>
+
+	    <!-- promoted builds plugin -->
+            <antcall target="editXmlEx" inheritAll="true" inheritRefs="true">
+                <param name="config.xml.file" value="@{config.xml.file}"/>
+                <param name="xpath.source" value="//entry[string='hudson-plugins-promoted_builds-JobPropertyImpl']/base-property/*"/>
+                <param name="xpath.dest" value="//properties"/>
+            </antcall>
+
+            <xmltask source="@{config.xml.file}" dest="@{config.xml.file}">
+                <rename path="//properties/originalValue[@class='hudson.plugins.promoted_builds.JobPropertyImpl']" to="hudson.plugins.promoted__builds.JobPropertyImpl"/>
+		<attr path="//properties/originalValue/hudson.plugins.promoted__builds.JobPropertyImpl" attr="class" remove="true"/>
+	    </xmltask>
+
+	    <!-- version number plugin -->
+            <xmltask source="@{config.xml.file}">
+                <copy path="count(/project/buildWrappers)" property="buildwrappers.count"/>
+            </xmltask>
+            <if>
+                <equals arg1="${buildwrappers.count}" arg2="0"/>
+                <then>
+                    <xmltask source="@{config.xml.file}" dest="@{config.xml.file}">
+                        <insert path="/project" xml="&lt;buildWrappers/&gt;"/>
+                    </xmltask>
+                </then>
+            </if>
+
+            <xmltask source="@{config.xml.file}">
+                <copy path="count(/matrix-project/buildWrappers)" property="buildwrappers.count"/>
+            </xmltask>
+            <if>
+                <equals arg1="${buildwrappers.count}" arg2="0"/>
+                <then>
+                    <xmltask source="@{config.xml.file}" dest="@{config.xml.file}">
+                        <insert path="/matrix-project" xml="&lt;buildWrappers/&gt;"/>
+                    </xmltask>
+                </then>
+            </if>
+
+            <antcall target="editXmlEx" inheritAll="true" inheritRefs="true">
+                <param name="config.xml.file" value="@{config.xml.file}"/>
+                <param name="xpath.source" value="//entry[string='org-jvnet-hudson-tools-versionnumber-VersionNumberBuilder']/external-property/*"/>
+                <param name="xpath.dest" value="//buildWrappers"/>
+            </antcall>
+
+            <xmltask source="@{config.xml.file}" dest="@{config.xml.file}">
+                <rename path="//buildWrappers/originalValue[@class='org.jvnet.hudson.tools.versionnumber.VersionNumberBuilder']" to="org.jvnet.hudson.tools.versionnumber.VersionNumberBuilder"/>
+		<attr path="//buildWrappers/org.jvnet.hudson.tools.versionnumber.VersionNumberBuilder" attr="class" remove="true"/>
+	    </xmltask>
+
+	    <!-- hudson setenv plugin to Environment Script Plugin -->
+	    <antcall target="editXmlEx" inheritAll="true" inheritRefs="true">
+                <param name="config.xml.file" value="@{config.xml.file}"/>
+                <param name="xpath.source" value="//entry[string='hudson-plugins-setenv-SetEnvBuildWrapper']/external-property/*"/>
+                <param name="xpath.dest" value="//buildWrappers"/>
+            </antcall>
+
+            <xmltask source="@{config.xml.file}" dest="@{config.xml.file}">
+                <rename path="//buildWrappers/originalValue[@class='hudson.plugins.setenv.SetEnvBuildWrapper']" to="com.lookout.jenkins.EnvironmentScript"/>
+		<attr path="//buildWrappers/com.lookout.jenkins.EnvironmentScript" attr="class" remove="true"/>
+                <rename path="//buildWrappers/com.lookout.jenkins.EnvironmentScript/localVarText" to="script"/>
+	    </xmltask>
+	
+            <antcall target="editXml" inheritAll="true" inheritRefs="true">
+                <param name="config.xml.file" value="@{config.xml.file}"/>
+                <param name="xpath.source" value="//entry[string='axes']/axis-list-property/originalValue/*"/>
+                <param name="xpath.insert" value="/*"/>
+                <param name="xpath.dest" value="/*/axes"/>
+                <param name="xml.to.insert" value="&lt;axes/&gt;"/>
+            </antcall>
+
+            <antcall target="editXml" inheritAll="true" inheritRefs="true">
+                <param name="config.xml.file" value="@{config.xml.file}"/>
+                <param name="xpath.source" value="//entry[string='logRotator']/log-rotator-property/originalValue/*"/>
+                <param name="xpath.insert" value="/*"/>
+                <param name="xpath.dest" value="/*/logRotator"/>
+                <param name="xml.to.insert" value="&lt;logRotator/&gt;"/>
+            </antcall>
+            <antcall target="editXml" inheritAll="true" inheritRefs="true">
+                <param name="config.xml.file" value="@{config.xml.file}"/>
+                <param name="xpath.source" value="//entry[string='scmCheckoutRetryCount']/integer-property/originalValue/text()"/>
+                <param name="xpath.insert" value="/*"/>
+                <param name="xpath.dest" value="/*/scmCheckoutRetryCount"/>
+                <param name="xml.to.insert" value="&lt;scmCheckoutRetryCount/&gt;"/>
+            </antcall>
+            <antcall target="editXml" inheritAll="true" inheritRefs="true">
+                <param name="config.xml.file" value="@{config.xml.file}"/>
+                <param name="xpath.source" value="//entry[string='org-jenkinsci-plugins-envinject-EnvInjectBuildWrapper']/external-property/originalValue/*"/>
+                <param name="xpath.insert" value="/*"/>
+                <param name="xpath.dest" value="/*/buildWrappers/EnvInjectBuildWrapper"/>
+                <param name="xml.to.insert" value="&lt;buildWrappers&gt;&lt;EnvInjectBuildWrapper/&gt;&lt;/buildWrappers&gt;"/>
+            </antcall>
+
+            <xmltask source="@{config.xml.file}">
+                <copy path="count(/project/publishers)" property="publishers.count"/>
+            </xmltask>
+            <if>
+                <equals arg1="${publishers.count}" arg2="0"/>
+                <then>
+                    <xmltask source="@{config.xml.file}" dest="@{config.xml.file}">
+                        <insert path="/project" xml="&lt;publishers/&gt;"/>
+                    </xmltask>
+                </then>
+            </if>
+
+            <xmltask source="@{config.xml.file}">
+                <copy path="count(/matrix-project/publishers)" property="publishers.count"/>
+            </xmltask>
+            <if>
+                <equals arg1="${publishers.count}" arg2="0"/>
+                <then>
+                    <xmltask source="@{config.xml.file}" dest="@{config.xml.file}">
+                        <insert path="/matrix-project" xml="&lt;publishers/&gt;"/>
+                    </xmltask>
+                </then>
+            </if>
+
+
+            <antcall target="editXml" inheritAll="true" inheritRefs="true">
+                <param name="config.xml.file" value="@{config.xml.file}"/>
+                <param name="xpath.source" value="//entry[string='hudson-tasks-Mailer']/external-property/originalValue/*"/>
+                <param name="xpath.insert" value="/*/publishers"/>
+                <param name="xpath.dest" value="/*/publishers/hudson.tasks.Mailer"/>
+                <param name="xml.to.insert" value="&lt;hudson.tasks.Mailer/&gt;"/>
+            </antcall>
+
+
+
+
+            <antcall target="editXml" inheritAll="true" inheritRefs="true">
+                <param name="config.xml.file" value="@{config.xml.file}"/>
+                <param name="xpath.source" value="//entry[string='parametersDefinitionProperties']/copy-write-list-property/originalValue/*"/>
+                <param name="xpath.insert" value="/*"/>
+                <param name="xpath.dest" value="/*/properties"/>
+                <param name="xml.to.insert" value=""/>
+            </antcall>
+            <antcall target="editXml" inheritAll="true" inheritRefs="true">
+                <param name="config.xml.file" value="@{config.xml.file}"/>
+                <param name="xpath.source" value="//entry[string='quietPeriod']/integer-property/originalValue/text()"/>
+                <param name="xpath.insert" value="*"/>
+                <param name="xpath.dest" value="/*/quietPeriod"/>
+                <param name="xml.to.insert" value="&lt;quietPeriod/&gt;"/>
+            </antcall>
+            <antcall target="editXml" inheritAll="true" inheritRefs="true">
+                <param name="config.xml.file" value="@{config.xml.file}"/>
+                <param name="xpath.source" value="//entry[string='hudson-tasks-BuildTrigger']/external-property/originalValue/*"/>
+                <param name="xpath.insert" value="/*/publishers"/>
+                <param name="xpath.dest" value="/*/publishers/hudson.tasks.BuildTrigger"/>
+                <param name="xml.to.insert" value="&lt;hudson.tasks.BuildTrigger/&gt;"/>
+            </antcall>
+            <antcall target="editXml" inheritAll="true" inheritRefs="true">
+                <param name="config.xml.file" value="@{config.xml.file}"/>
+                <param name="xpath.source" value="//entry[string='hudson-plugins-parameterizedtrigger-BuildTrigger']/external-property/originalValue/*"/>
+                <param name="xpath.insert" value="/*/publishers"/>
+                <param name="xpath.dest" value="/*/publishers/hudson.plugins.parameterizedtrigger.BuildTrigger"/>
+                <param name="xml.to.insert" value="&lt;hudson.plugins.parameterizedtrigger.BuildTrigger/&gt;"/>
+            </antcall>
+            <antcall target="editXml" inheritAll="true" inheritRefs="true">
+                <param name="config.xml.file" value="@{config.xml.file}"/>
+                <param name="xpath.source" value="//entry[string='hudson-triggers-SCMTrigger']/trigger-property/originalValue/*"/>
+                <param name="xpath.insert" value="/*"/>
+                <param name="xpath.dest" value="/*/triggers/hudson.triggers.SCMTrigger"/>
+                <param name="xml.to.insert" value="&lt;triggers class='vector'&gt;&lt;hudson.triggers.SCMTrigger/&gt;&lt;/triggers&gt;"/>
+            </antcall>
+
+            <xmltask source="@{config.xml.file}">
+                <copy path="count(/project/builders)" property="builders.count"/>
+            </xmltask>
+            <if>
+                <equals arg1="${builders.count}" arg2="0"/>
+                <then>
+                    <xmltask source="@{config.xml.file}" dest="@{config.xml.file}">
+                        <insert path="/project" xml="&lt;builders/&gt;"/>
+                    </xmltask>
+                </then>
+            </if>
+
+            <xmltask source="@{config.xml.file}">
+                <copy path="count(/matrix-project/builders)" property="builders.count"/>
+            </xmltask>
+            <if>
+                <equals arg1="${builders.count}" arg2="0"/>
+                <then>
+                    <xmltask source="@{config.xml.file}" dest="@{config.xml.file}">
+                        <insert path="/matrix-project" xml="&lt;builders/&gt;"/>
+                    </xmltask>
+                </then>
+            </if>
+
+
+            <antcall target="editXml" inheritAll="true" inheritRefs="true">
+                <param name="config.xml.file" value="@{config.xml.file}"/>
+                <param name="xpath.source" value="//entry[string='builders']/describable-list-property/originalValue/*"/>
+                <param name="xpath.insert" value="/*"/>
+                <param name="xpath.dest" value="/*/builders"/>
+                <param name="xml.to.insert" value=""/>
+            </antcall>
+            <antcall target="editXml" inheritAll="true" inheritRefs="true">
+                <param name="config.xml.file" value="@{config.xml.file}"/>
+                <param name="xpath.source" value="//entry[string='jdk']/string-property/originalValue/text()"/>
+                <param name="xpath.insert" value="/*"/>
+                <param name="xpath.dest" value="/*/jdk"/>
+                <param name="xml.to.insert" value="&lt;jdk/&gt;"/>
+            </antcall>
+            <antcall target="editXml" inheritAll="true" inheritRefs="true">
+                <param name="config.xml.file" value="@{config.xml.file}"/>
+                <param name="xpath.source" value="//entry[string='hudson-tasks-ArtifactArchiver']/external-property/originalValue/*"/>
+                <param name="xpath.insert" value="/*/publishers"/>
+                <param name="xpath.dest" value="/*/publishers/hudson.tasks.ArtifactArchiver"/>
+                <param name="xml.to.insert" value="&lt;hudson.tasks.ArtifactArchiver/&gt;"/>
+            </antcall>
+
+
+            <xmltask source="@{config.xml.file}" dest="@{config.xml.file}">
+                <remove path="/*/scm"/>
+            </xmltask>
+            <antcall target="editXml" inheritAll="true" inheritRefs="true">
+                <param name="config.xml.file" value="@{config.xml.file}"/>
+                <param name="xpath.source" value="//entry[string='scm']/scm-property/originalValue/*"/>
+                <param name="xpath.insert" value="/*"/>
+                <param name="xpath.dest" value="/*/scm"/>
+                <param name="xml.to.insert" value="&lt;scm class='hudson.scm.SubversionSCM'/&gt;"/>
+            </antcall>
+
+            <xmltask source="@{config.xml.file}" dest="@{config.xml.file}">
+                <remove path="/*/project-properties"/>
+                <remove path="/*/creationTime"/>
+                <remove path="/*/cascading-job-properties"/>
+                <remove path="/*/cascadingChildrenNames"/>
+                <remove path="/*/advancedAffinityChooser"/>
+                <remove path="/*/cleanWorkspaceRequired"/>
+                <remove path="//autoValidateFileMask"/>
+                <remove path="//hudson.tasks.ArtifactArchiver//compressionType"/>
+                <remove path="//hudson.tasks.ArtifactArchiver//autoValidateFileMask"/>
+
+                <remove path="/*/rootModule"/>
+                <remove path="/*/pomInfo"/>
+
+                <replace path="/*/scm/workspaceUpdater[@class='hudson.scm.subversion.CheckoutWithLocationFoldersCleanupUpdater']/@class" withText="hudson.scm.subversion.CheckoutUpdater"/>
+
+                <remove path="/project/createdBy"/>
+                <remove path="/matrix-project/createdBy"/>
+                
+                <!-- !! Artifact archiving in Maven2 style jobs is not migrated !! -->
+                <remove path="//maven-artifact-archiver"/>
+            </xmltask>
+    </sequential>
+    </for>
+
+    <for param="build.xml.file">
+    <path>
+        <fileset dir="${env.JENKINS_HOME}/jobs/${hudson.job}/builds">
+            <include name="**/build.xml"/>
+        </fileset>
+    </path>
+    <sequential>
+        <antcall target="editBuildXml" inheritall="true">
+            <param name="build.xml.file" value="@{build.xml.file}"/>
+        </antcall>
+    </sequential>
+    </for>
+</target>
+
+<target name="editXml">
+    <local name="occs"/>
+
+    <xmltask source="${config.xml.file}">
+        <copy path="count(${xpath.source})" property="occs"/>
+    </xmltask>
+    <if>
+        <not><equals arg1="${occs}" arg2="0"/></not>
+        <then>
+        <echo message="Migrating ${xpath.source}"/>
+        <xmltask source="${config.xml.file}" dest="${config.xml.file}">
+            <copy path="${xpath.source}" buffer="theValue" append="true"/>
+            <insert path="${xpath.insert}" xml="${xml.to.insert}"/>
+            <insert path="${xpath.dest}" buffer="theValue"/>
+        </xmltask>
+        </then>
+        <else>
+            <echo message="Element not found, so not migrating: ${xpath.source}"/>
+        </else>
+    </if>
+</target>
+
+<target name="editXmlEx">
+    <local name="occs"/>
+
+    <xmltask source="${config.xml.file}">
+        <copy path="count(${xpath.source})" property="occs"/>
+    </xmltask>
+    <if>
+        <not><equals arg1="${occs}" arg2="0"/></not>
+        <then>
+        <echo message="Migrating ${xpath.source}"/>
+        <xmltask source="${config.xml.file}" dest="${config.xml.file}">
+            <copy path="${xpath.source}" buffer="theValue" append="true"/>
+            <insert path="${xpath.dest}" buffer="theValue"/>
+        </xmltask>
+        </then>
+        <else>
+            <echo message="Element not found, so not migrating: ${xpath.source}"/>
+        </else>
+    </if>
+</target>
+
+
+
+<target name="editBuildXml">
+    <local name="occs.no.comp"/>
+    <xmltask source="${build.xml.file}">
+        <copy path="count(/*/actions/hudson.scm.SubversionTagAction/tags/no-comparator)" property="occs.no.comp"/>
+    </xmltask>
+    <if>
+        <equals arg1="${occs.no.comp}" arg2="0"/>
+        <then>
+        <echo message="Migrating ${build.xml.file}"/>
+        <xmltask source="${build.xml.file}" dest="${build.xml.file}">
+            <insert path="/*/actions/hudson.scm.SubversionTagAction/tags/entry[1]" xml="&lt;no-comparator/&gt;" position="before"/>
+        </xmltask>
+        </then>
+     </if>
+</target>
+
+</project>
